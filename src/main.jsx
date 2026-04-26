@@ -8,6 +8,81 @@ const PYTHON_ACCEPT = {
 };
 
 const SAMPLE_TERMINAL = "> ready\n> open a .py file or folder, then run it here";
+const PYODIDE_INDEX_URL = "/pyodide/";
+const PYODIDE_SCRIPT_URL = `${PYODIDE_INDEX_URL}pyodide.js`;
+
+let pyodidePromise = null;
+
+const PYTHON_RUNNER = `
+import builtins
+import io
+import json
+import os
+import sys
+import traceback
+
+_workspace = "/workspace"
+_entry_path = ENTRY_PATH
+_user_code = USER_CODE
+_debug_mode = bool(DEBUG_MODE)
+
+_stdout_buffer = io.StringIO()
+_stderr_buffer = io.StringIO()
+_old_stdout = sys.stdout
+_old_stderr = sys.stderr
+_old_input = builtins.input
+_exit_code = 0
+
+def _browser_input(prompt=""):
+    if prompt:
+        print(prompt, end="")
+    raise RuntimeError("input() is not supported in the browser runner yet.")
+
+try:
+    sys.stdout = _stdout_buffer
+    sys.stderr = _stderr_buffer
+    builtins.input = _browser_input
+    os.chdir(_workspace)
+
+    _entry_dir = os.path.dirname(_entry_path)
+    for _path in (_entry_dir, _workspace):
+        if _path and _path not in sys.path:
+            sys.path.insert(0, _path)
+
+    _globals = {
+        "__name__": "__main__",
+        "__file__": _entry_path,
+        "__builtins__": builtins,
+    }
+    _compiled = compile(_user_code, _entry_path, "exec")
+
+    if _debug_mode:
+        import trace
+        trace.Trace(trace=True, ignoredirs=[sys.prefix, sys.exec_prefix]).runctx(_compiled, _globals, _globals)
+    else:
+        exec(_compiled, _globals, _globals)
+except SystemExit as _error:
+    if _error.code is None:
+        _exit_code = 0
+    elif isinstance(_error.code, int):
+        _exit_code = _error.code
+    else:
+        print(_error.code, file=sys.stderr)
+        _exit_code = 1
+except Exception:
+    _exit_code = 1
+    traceback.print_exc()
+finally:
+    sys.stdout = _old_stdout
+    sys.stderr = _old_stderr
+    builtins.input = _old_input
+
+json.dumps({
+    "stdout": _stdout_buffer.getvalue(),
+    "stderr": _stderr_buffer.getvalue(),
+    "code": _exit_code,
+})
+`;
 
 function basename(filePath) {
   return filePath.split(/[\\/]/).pop() || filePath;
@@ -24,6 +99,20 @@ function makeId(prefix) {
 
 function isPythonFile(name) {
   return name.toLowerCase().endsWith(".py");
+}
+
+function safePythonPath(filePath) {
+  const normalized = normalizeRelativePath(filePath);
+
+  if (!isPythonFile(normalized)) {
+    throw new Error("Only .py scripts can be run.");
+  }
+
+  if (normalized.split("/").some((part) => !part || part === "." || part === "..")) {
+    throw new Error("Invalid Python file path.");
+  }
+
+  return normalized;
 }
 
 function groupDocs(docs) {
@@ -63,6 +152,108 @@ async function requestJson(url, options) {
   }
 
   return body;
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector(`script[src="${src}"]`);
+
+    if (existing) {
+      existing.addEventListener("load", resolve, { once: true });
+      existing.addEventListener("error", reject, { once: true });
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.src = src;
+    script.async = true;
+    script.onload = resolve;
+    script.onerror = () => reject(new Error("Could not load the browser Python runtime."));
+    document.head.append(script);
+  });
+}
+
+async function getPyodide() {
+  if (!pyodidePromise) {
+    pyodidePromise = (async () => {
+      if (!window.loadPyodide) {
+        await loadScript(PYODIDE_SCRIPT_URL);
+      }
+
+      if (!window.loadPyodide) {
+        throw new Error("The browser Python runtime did not start.");
+      }
+
+      return window.loadPyodide({ indexURL: PYODIDE_INDEX_URL });
+    })();
+  }
+
+  return pyodidePromise;
+}
+
+function resetBrowserWorkspace(pyodide) {
+  const { FS } = pyodide;
+
+  function removeTree(targetPath) {
+    if (!FS.analyzePath(targetPath).exists) return;
+
+    for (const name of FS.readdir(targetPath)) {
+      if (name === "." || name === "..") continue;
+
+      const childPath = `${targetPath}/${name}`;
+      const stat = FS.stat(childPath);
+
+      if (FS.isDir(stat.mode)) {
+        removeTree(childPath);
+      } else {
+        FS.unlink(childPath);
+      }
+    }
+
+    if (targetPath !== "/workspace") {
+      FS.rmdir(targetPath);
+    }
+  }
+
+  if (FS.analyzePath("/workspace").exists) {
+    removeTree("/workspace");
+  } else {
+    FS.mkdir("/workspace");
+  }
+}
+
+function writeBrowserProject(pyodide, files) {
+  resetBrowserWorkspace(pyodide);
+
+  for (const file of files) {
+    const relativePath = safePythonPath(file.path);
+    const targetPath = `/workspace/${relativePath}`;
+    const directory = targetPath.slice(0, targetPath.lastIndexOf("/"));
+
+    if (directory && directory !== "/workspace") {
+      pyodide.FS.mkdirTree(directory);
+    }
+
+    pyodide.FS.writeFile(targetPath, file.content || "", { encoding: "utf8" });
+  }
+}
+
+async function runPythonInBrowser({ entryPath, files, debug }) {
+  const pyodide = await getPyodide();
+  const safeEntryPath = safePythonPath(entryPath);
+  const entryFile = files.find((file) => safePythonPath(file.path) === safeEntryPath);
+
+  if (!entryFile) {
+    throw new Error("The active Python file was not found in the browser workspace.");
+  }
+
+  writeBrowserProject(pyodide, files);
+  pyodide.globals.set("ENTRY_PATH", `/workspace/${safeEntryPath}`);
+  pyodide.globals.set("USER_CODE", entryFile.content || "");
+  pyodide.globals.set("DEBUG_MODE", Boolean(debug));
+
+  const result = await pyodide.runPythonAsync(PYTHON_RUNNER);
+  return JSON.parse(result);
 }
 
 async function readFileHandle(handle) {
@@ -153,11 +344,6 @@ function App() {
   const activeDoc = docs.find((doc) => doc.id === activeId) || docs[0] || null;
   const groups = useMemo(() => groupDocs(docs), [docs]);
   const lines = activeDoc?.content.split("\n").length || 1;
-  const canUseFileSystemAccess =
-    typeof window !== "undefined" &&
-    "showOpenFilePicker" in window &&
-    "showDirectoryPicker" in window;
-
   useEffect(() => {
     loadWorkspace();
   }, []);
@@ -402,30 +588,20 @@ function App() {
     }
 
     setIsBusy(true);
-    setTerminal(`> ${debug ? "debug" : "run"} ${activeDoc.relativePath}\n`);
+    setTerminal(`> ${debug ? "debug" : "run"} ${activeDoc.relativePath}\n> starting browser Python...\n`);
 
     try {
-      const body =
-        activeDoc.origin === "workspace"
-          ? {
-              workspacePath: activeDoc.relativePath,
-              content: activeDoc.content,
-              debug
-            }
-          : {
-              entryPath: activeDoc.relativePath,
-              debug,
-              files: docs
-                .filter((doc) => doc.rootId === activeDoc.rootId && isPythonFile(doc.relativePath))
-                .map((doc) => ({
-                  path: doc.relativePath,
-                  content: doc.id === activeDoc.id ? activeDoc.content : doc.content
-                }))
-            };
+      const projectFiles = docs
+        .filter((doc) => doc.rootId === activeDoc.rootId && isPythonFile(doc.relativePath))
+        .map((doc) => ({
+          path: doc.relativePath,
+          content: doc.id === activeDoc.id ? activeDoc.content : doc.content
+        }));
 
-      const result = await requestJson("/api/run", {
-        method: "POST",
-        body: JSON.stringify(body)
+      const result = await runPythonInBrowser({
+        entryPath: activeDoc.relativePath,
+        files: projectFiles,
+        debug
       });
 
       const output = [
@@ -438,9 +614,6 @@ function App() {
 
       setTerminal((current) => `${current}${output || "\n> no output"}`);
 
-      if (activeDoc.origin === "workspace") {
-        replaceDoc(activeDoc.id, { dirty: false });
-      }
     } catch (error) {
       setTerminal((current) => `${current}\n${error.message}`);
     } finally {
@@ -627,7 +800,7 @@ function App() {
 
       <footer className="statusbar">
         <span>{activeDoc?.relativePath || "No file"}</span>
-        <span>{canUseFileSystemAccess ? "Local files and folders enabled" : "Fallback file picker"}</span>
+        <span>Python runs in browser</span>
         <span>
           Ln {cursor.line}, Col {cursor.column}
         </span>

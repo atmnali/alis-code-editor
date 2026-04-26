@@ -11,6 +11,7 @@ const WORKSPACE_DIR = path.join(ROOT, "workspace");
 const DOCUMENTS_SAVE_DIR = path.join(ROOT, "saved-python-files");
 const RUNTIME_DIR = path.join(ROOT, ".runtime");
 const DIST_DIR = path.join(ROOT, "dist");
+const PYODIDE_DIR = path.join(ROOT, "node_modules", "pyodide");
 const PORT = Number(process.env.PORT || 5173);
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 
@@ -19,8 +20,11 @@ const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".map": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
-  ".ico": "image/x-icon"
+  ".ico": "image/x-icon",
+  ".wasm": "application/wasm",
+  ".zip": "application/zip"
 };
 
 async function ensureWorkspace() {
@@ -305,6 +309,33 @@ async function serveProduction(req, res) {
   }
 }
 
+async function servePyodide(req, res) {
+  const requestPath = decodeURIComponent(new URL(req.url, `http://localhost:${PORT}`).pathname);
+  const relative = requestPath.replace(/^\/pyodide\/?/, "");
+
+  if (!relative) {
+    sendText(res, 404, "Not found");
+    return;
+  }
+
+  const absolute = path.resolve(PYODIDE_DIR, relative);
+  const inside = path.relative(PYODIDE_DIR, absolute);
+
+  if (inside.startsWith("..") || path.isAbsolute(inside)) {
+    sendText(res, 403, "Forbidden");
+    return;
+  }
+
+  try {
+    const data = await fs.readFile(absolute);
+    const type = MIME_TYPES[path.extname(absolute)] || "application/octet-stream";
+    res.writeHead(200, { "content-type": type });
+    res.end(data);
+  } catch {
+    sendText(res, 404, "Not found");
+  }
+}
+
 async function start() {
   await ensureWorkspace();
 
@@ -318,6 +349,11 @@ async function start() {
   }
 
   const server = http.createServer((req, res) => {
+    if (req.url.startsWith("/pyodide/")) {
+      servePyodide(req, res);
+      return;
+    }
+
     if (req.url.startsWith("/api/")) {
       handleApi(req, res);
       return;
