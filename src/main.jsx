@@ -118,16 +118,6 @@ function Icon({ name }) {
     );
   }
 
-  if (name === "save") {
-    return (
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M5 4h12l2 2v14H5z" />
-        <path d="M8 4v6h8V4" />
-        <path d="M8 20v-6h8v6" />
-      </svg>
-    );
-  }
-
   if (name === "play") {
     return (
       <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -319,7 +309,7 @@ function App() {
         writable: false
       }
     ]);
-    setTerminal(`> opened ${file.name}\n> save-back needs Chrome or Edge on localhost`);
+    setTerminal(`> opened ${file.name}\n> write-back needs Chrome or Edge on localhost`);
   }
 
   async function handleFallbackFolder(event) {
@@ -354,31 +344,51 @@ function App() {
     );
 
     addDocs(folderDocs);
-    setTerminal(`> opened folder ${rootName}\n> save-back needs Chrome or Edge on localhost`);
+    setTerminal(`> opened folder ${rootName}\n> write-back needs Chrome or Edge on localhost`);
   }
 
   async function saveActiveDoc() {
     if (!activeDoc) return;
 
     try {
-      if (activeDoc.origin === "workspace") {
-        await requestJson("/api/workspace-file", {
-          method: "POST",
-          body: JSON.stringify({
-            path: activeDoc.relativePath,
-            content: activeDoc.content
-          })
-        });
-      } else if (activeDoc.handle?.createWritable) {
-        const writable = await activeDoc.handle.createWritable();
-        await writable.write(activeDoc.content);
-        await writable.close();
-      } else {
-        throw new Error("This browser opened the file read-only. Use Chrome or Edge on localhost to save it back.");
+      const documentsSave = await requestJson("/api/documents-file", {
+        method: "POST",
+        body: JSON.stringify({
+          path: activeDoc.relativePath,
+          content: activeDoc.content
+        })
+      });
+
+      let originalStatus = "> original file is browser read-only";
+
+      try {
+        if (activeDoc.origin === "workspace") {
+          await requestJson("/api/workspace-file", {
+            method: "POST",
+            body: JSON.stringify({
+              path: activeDoc.relativePath,
+              content: activeDoc.content
+            })
+          });
+          originalStatus = "> updated workspace file";
+        } else if (activeDoc.handle?.createWritable) {
+          const writable = await activeDoc.handle.createWritable();
+          await writable.write(activeDoc.content);
+          await writable.close();
+          originalStatus = "> updated original file";
+        }
+      } catch (error) {
+        originalStatus = `> original file update failed: ${error.message}`;
       }
 
       replaceDoc(activeDoc.id, { dirty: false });
-      setTerminal(`> saved ${activeDoc.relativePath}`);
+      setTerminal(
+        [
+          `> wrote ${activeDoc.relativePath}`,
+          originalStatus,
+          `> documents copy: ${documentsSave.absolutePath}`
+        ].join("\n")
+      );
     } catch (error) {
       setTerminal(error.message);
     }
@@ -530,7 +540,7 @@ function App() {
                 >
                   <span className="file-icon">PY</span>
                   <span className="file-name">{doc.relativePath}</span>
-                  {doc.dirty && <span className="dirty-dot" aria-label="Unsaved changes" />}
+                  {doc.dirty && <span className="dirty-dot" aria-label="Pending changes" />}
                 </button>
               ))}
             </section>
@@ -561,10 +571,7 @@ function App() {
           onChange={(event) => setProjectName(event.target.value)}
           aria-label="Project name"
         />
-        <button className="tool-button save" type="button" title="Save with Ctrl+S" onClick={saveActiveDoc}>
-          <Icon name="save" />
-          <span>Save</span>
-        </button>
+        <div className="topbar-empty" aria-hidden="true" />
         <button
           className="tool-button run"
           type="button"
@@ -590,9 +597,7 @@ function App() {
       <section className="editor-pane" aria-label="Python editor">
         <div className="tab-strip">
           <div className="active-tab">{activeDoc ? activeDoc.relativePath : "No Python file"}</div>
-          <div className={`save-state${activeDoc?.dirty ? " unsaved" : ""}`}>
-            {activeDoc?.dirty ? "Unsaved" : "Saved"}
-          </div>
+          <div className="tab-spacer" aria-hidden="true" />
         </div>
         <div className="code-shell">
           <pre className="line-numbers" ref={lineNumberRef} aria-hidden="true">

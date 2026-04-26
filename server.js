@@ -8,6 +8,7 @@ import { spawn, spawnSync } from "node:child_process";
 const __filename = fileURLToPath(import.meta.url);
 const ROOT = path.dirname(__filename);
 const WORKSPACE_DIR = path.join(ROOT, "workspace");
+const DOCUMENTS_SAVE_DIR = path.join(ROOT, "saved-python-files");
 const RUNTIME_DIR = path.join(ROOT, ".runtime");
 const DIST_DIR = path.join(ROOT, "dist");
 const PORT = Number(process.env.PORT || 5173);
@@ -24,6 +25,7 @@ const MIME_TYPES = {
 
 async function ensureWorkspace() {
   await fs.mkdir(WORKSPACE_DIR, { recursive: true });
+  await fs.mkdir(DOCUMENTS_SAVE_DIR, { recursive: true });
   await fs.rm(RUNTIME_DIR, { recursive: true, force: true });
   await fs.mkdir(RUNTIME_DIR, { recursive: true });
 
@@ -235,6 +237,19 @@ async function handleApi(req, res) {
       await fs.mkdir(path.dirname(absolute), { recursive: true });
       await fs.writeFile(absolute, String(body.content || ""), "utf8");
       sendJson(res, 200, { path: relative, saved: true });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/documents-file") {
+      const body = await readJson(req);
+      const { absolute, relative } = safePathInside(DOCUMENTS_SAVE_DIR, body.path);
+      await fs.mkdir(path.dirname(absolute), { recursive: true });
+      await fs.writeFile(absolute, String(body.content || ""), "utf8");
+      sendJson(res, 200, {
+        path: relative,
+        absolutePath: absolute,
+        saved: true
+      });
       return;
     }
 

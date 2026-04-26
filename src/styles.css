@@ -233,12 +233,13 @@ svg {
   font-weight: 700;
 }
 
-.tool-button:hover {
-  background: #303030;
+.topbar-empty {
+  border-right: 1px solid var(--border);
+  background: transparent;
 }
 
-.tool-button.save {
-  color: #f1f1f1;
+.tool-button:hover {
+  background: #303030;
 }
 
 .tool-button.run {
@@ -283,17 +284,9 @@ svg {
   white-space: nowrap;
 }
 
-.save-state {
+.tab-spacer {
   margin-left: auto;
-  display: flex;
-  align-items: center;
-  padding: 0 12px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.save-state.unsaved {
-  color: var(--orange);
+  width: 72px;
 }
 
 .code-shell {
