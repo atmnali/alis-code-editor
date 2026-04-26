@@ -58,8 +58,8 @@ svg {
 
 .workbench {
   display: grid;
-  grid-template-columns: 128px minmax(300px, 1fr) minmax(240px, 31vw);
-  grid-template-rows: 72px minmax(0, 1fr) 28px;
+  grid-template-columns: 150px minmax(320px, 1fr) 240px;
+  grid-template-rows: 70px minmax(0, 1fr) 28px;
   width: 100vw;
   height: 100vh;
   background: var(--bg);
@@ -84,6 +84,10 @@ svg {
   font-weight: 700;
   letter-spacing: 0;
   text-transform: uppercase;
+}
+
+.explorer .pane-title {
+  height: 70px;
 }
 
 .explorer-title {
@@ -120,7 +124,7 @@ svg {
 }
 
 .file-list {
-  height: calc(100% - 40px);
+  height: calc(100% - 70px);
   overflow: auto;
   padding: 8px 0;
 }
@@ -198,7 +202,7 @@ svg {
 .topbar {
   grid-column: 2 / 4;
   display: grid;
-  grid-template-columns: minmax(210px, 1fr) 140px 120px 120px;
+  grid-template-columns: minmax(230px, 1fr) 140px 120px 120px;
   min-width: 0;
   background: var(--panel-2);
   border-bottom: 1px solid var(--border);
