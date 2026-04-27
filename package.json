@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "A VSCode-inspired Python-only code editor built with React.",
+  "description": "A VSCode-inspired JavaScript-only code editor built with React.",
   "scripts": {
     "dev": "node server.js",
     "build": "vite build",
@@ -11,7 +11,6 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
-    "pyodide": "^0.26.4",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "vite": "^5.4.12"

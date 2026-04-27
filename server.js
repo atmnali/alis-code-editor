@@ -3,15 +3,12 @@ import fsSync from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn, spawnSync } from "node:child_process";
 
 const __filename = fileURLToPath(import.meta.url);
 const ROOT = path.dirname(__filename);
 const WORKSPACE_DIR = path.join(ROOT, "workspace");
-const DOCUMENTS_SAVE_DIR = path.join(ROOT, "saved-python-files");
-const RUNTIME_DIR = path.join(ROOT, ".runtime");
+const DOCUMENTS_SAVE_DIR = path.join(ROOT, "saved-javascript-files");
 const DIST_DIR = path.join(ROOT, "dist");
-const PYODIDE_DIR = path.join(ROOT, "node_modules", "pyodide");
 const PORT = Number(process.env.PORT || 5173);
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 
@@ -22,32 +19,30 @@ const MIME_TYPES = {
   ".json": "application/json; charset=utf-8",
   ".map": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
-  ".ico": "image/x-icon",
-  ".wasm": "application/wasm",
-  ".zip": "application/zip"
+  ".ico": "image/x-icon"
 };
 
 async function ensureWorkspace() {
   await fs.mkdir(WORKSPACE_DIR, { recursive: true });
   await fs.mkdir(DOCUMENTS_SAVE_DIR, { recursive: true });
-  await fs.rm(RUNTIME_DIR, { recursive: true, force: true });
-  await fs.mkdir(RUNTIME_DIR, { recursive: true });
 
-  const mainPath = path.join(WORKSPACE_DIR, "main.py");
+  const mainPath = path.join(WORKSPACE_DIR, "main.js");
   if (!fsSync.existsSync(mainPath)) {
     await fs.writeFile(
       mainPath,
       [
-        "project_name = \"Ali's Code Editor\"",
+        "const projectName = \"Ali's Code Editor\";",
         "",
-        "def greet(name):",
-        "    return f\"Hello, {name}!\"",
+        "function greet(name) {",
+        "  return `Hello, ${name}!`;",
+        "}",
         "",
-        "print(project_name)",
-        "print(greet(\"Python\"))",
+        "console.log(projectName);",
+        "console.log(greet(\"JavaScript\"));",
         "",
-        "for number in range(1, 4):",
-        "    print(f\"Line {number} is running\")",
+        "for (let number = 1; number <= 3; number += 1) {",
+        "  console.log(`Line ${number} is running`);",
+        "}",
         ""
       ].join("\n"),
       "utf8"
@@ -79,26 +74,26 @@ async function readJson(req) {
   return raw ? JSON.parse(raw) : {};
 }
 
-function normalizePythonPath(relativePath) {
+function normalizeScriptPath(relativePath) {
   if (typeof relativePath !== "string" || !relativePath.trim()) {
-    throw new Error("A Python file path is required.");
+    throw new Error("A JavaScript file path is required.");
   }
 
   const normalized = relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
 
-  if (!normalized.endsWith(".py")) {
-    throw new Error("This editor only opens and runs .py files.");
+  if (!normalized.endsWith(".js")) {
+    throw new Error("This editor only opens and saves .js files.");
   }
 
   if (normalized.split("/").some((part) => !part || part === "." || part === "..")) {
-    throw new Error("Invalid Python file path.");
+    throw new Error("Invalid JavaScript file path.");
   }
 
   return normalized;
 }
 
 function safePathInside(root, relativePath) {
-  const normalized = normalizePythonPath(relativePath);
+  const normalized = normalizeScriptPath(relativePath);
   const absolute = path.resolve(root, normalized);
   const relative = path.relative(root, absolute);
 
@@ -112,7 +107,7 @@ function safePathInside(root, relativePath) {
   };
 }
 
-async function walkPythonFiles(dir = WORKSPACE_DIR, base = "") {
+async function walkJavaScriptFiles(dir = WORKSPACE_DIR, base = "") {
   const entries = await fs.readdir(dir, { withFileTypes: true });
   const files = [];
 
@@ -121,8 +116,8 @@ async function walkPythonFiles(dir = WORKSPACE_DIR, base = "") {
     const absolute = path.join(dir, entry.name);
 
     if (entry.isDirectory()) {
-      files.push(...(await walkPythonFiles(absolute, relative)));
-    } else if (entry.isFile() && entry.name.endsWith(".py")) {
+      files.push(...(await walkJavaScriptFiles(absolute, relative)));
+    } else if (entry.isFile() && entry.name.endsWith(".js")) {
       files.push(relative.replace(/\\/g, "/"));
     }
   }
@@ -130,100 +125,12 @@ async function walkPythonFiles(dir = WORKSPACE_DIR, base = "") {
   return files.sort((a, b) => a.localeCompare(b));
 }
 
-function findPython() {
-  const candidates = [
-    { cmd: "python", args: [] },
-    { cmd: "py", args: ["-3"] },
-    { cmd: "python3", args: [] }
-  ];
-
-  for (const candidate of candidates) {
-    const result = spawnSync(candidate.cmd, [...candidate.args, "--version"], {
-      encoding: "utf8",
-      windowsHide: true
-    });
-
-    if (result.status === 0) return candidate;
-  }
-
-  return null;
-}
-
-function runPython(filePath, cwd, debug) {
-  return new Promise((resolve) => {
-    const python = findPython();
-
-    if (!python) {
-      resolve({
-        code: 127,
-        stdout: "",
-        stderr: "Python was not found on PATH. Install Python or add it to PATH to run scripts."
-      });
-      return;
-    }
-
-    const args = debug
-      ? [...python.args, "-m", "trace", "--trace", filePath]
-      : [...python.args, filePath];
-
-    const child = spawn(python.cmd, args, {
-      cwd,
-      shell: false,
-      windowsHide: true
-    });
-
-    let stdout = "";
-    let stderr = "";
-    const timer = setTimeout(() => {
-      child.kill();
-      stderr += "\nProcess stopped after 10 seconds.";
-    }, 10000);
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      resolve({ code: 1, stdout, stderr: error.message });
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code, stdout, stderr });
-    });
-  });
-}
-
-async function writeRuntimeProject(files, entryPath) {
-  const runId = `run-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const runDir = path.join(RUNTIME_DIR, runId);
-  await fs.mkdir(runDir, { recursive: true });
-
-  for (const file of files) {
-    const relative = normalizePythonPath(file.path);
-    const target = path.resolve(runDir, relative);
-    const inside = path.relative(runDir, target);
-
-    if (inside.startsWith("..") || path.isAbsolute(inside)) {
-      throw new Error("Invalid file in opened folder.");
-    }
-
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.writeFile(target, String(file.content || ""), "utf8");
-  }
-
-  const entry = safePathInside(runDir, entryPath);
-  return { runDir, entryPath: entry.absolute };
-}
-
 async function handleApi(req, res) {
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
   try {
     if (req.method === "GET" && url.pathname === "/api/workspace-files") {
-      const files = await walkPythonFiles();
+      const files = await walkJavaScriptFiles();
       sendJson(res, 200, { files });
       return;
     }
@@ -257,30 +164,6 @@ async function handleApi(req, res) {
       return;
     }
 
-    if (req.method === "POST" && url.pathname === "/api/run") {
-      const body = await readJson(req);
-      const debug = Boolean(body.debug);
-
-      if (body.workspacePath) {
-        const { absolute, relative } = safePathInside(WORKSPACE_DIR, body.workspacePath);
-        await fs.writeFile(absolute, String(body.content || ""), "utf8");
-        const result = await runPython(absolute, path.dirname(absolute), debug);
-        sendJson(res, 200, { ...result, path: relative });
-        return;
-      }
-
-      const files = Array.isArray(body.files) ? body.files : [];
-      if (!files.length) {
-        throw new Error("No Python files were provided to run.");
-      }
-
-      const entryPath = normalizePythonPath(body.entryPath);
-      const runtime = await writeRuntimeProject(files, entryPath);
-      const result = await runPython(runtime.entryPath, runtime.runDir, debug);
-      sendJson(res, 200, { ...result, path: entryPath });
-      return;
-    }
-
     sendJson(res, 404, { error: "Unknown API route." });
   } catch (error) {
     sendJson(res, 400, { error: error.message });
@@ -309,33 +192,6 @@ async function serveProduction(req, res) {
   }
 }
 
-async function servePyodide(req, res) {
-  const requestPath = decodeURIComponent(new URL(req.url, `http://localhost:${PORT}`).pathname);
-  const relative = requestPath.replace(/^\/pyodide\/?/, "");
-
-  if (!relative) {
-    sendText(res, 404, "Not found");
-    return;
-  }
-
-  const absolute = path.resolve(PYODIDE_DIR, relative);
-  const inside = path.relative(PYODIDE_DIR, absolute);
-
-  if (inside.startsWith("..") || path.isAbsolute(inside)) {
-    sendText(res, 403, "Forbidden");
-    return;
-  }
-
-  try {
-    const data = await fs.readFile(absolute);
-    const type = MIME_TYPES[path.extname(absolute)] || "application/octet-stream";
-    res.writeHead(200, { "content-type": type });
-    res.end(data);
-  } catch {
-    sendText(res, 404, "Not found");
-  }
-}
-
 async function start() {
   await ensureWorkspace();
 
@@ -349,11 +205,6 @@ async function start() {
   }
 
   const server = http.createServer((req, res) => {
-    if (req.url.startsWith("/pyodide/")) {
-      servePyodide(req, res);
-      return;
-    }
-
     if (req.url.startsWith("/api/")) {
       handleApi(req, res);
       return;

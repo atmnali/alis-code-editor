@@ -2,87 +2,14 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
-const PYTHON_ACCEPT = {
-  "text/x-python": [".py"],
-  "text/plain": [".py"]
+const JAVASCRIPT_ACCEPT = {
+  "text/javascript": [".js"],
+  "application/javascript": [".js"],
+  "text/plain": [".js"]
 };
 
-const SAMPLE_TERMINAL = "> ready\n> open a .py file or folder, then run it here";
-const PYODIDE_INDEX_URL = "/pyodide/";
-const PYODIDE_SCRIPT_URL = `${PYODIDE_INDEX_URL}pyodide.js`;
-
-let pyodidePromise = null;
-
-const PYTHON_RUNNER = `
-import builtins
-import io
-import json
-import os
-import sys
-import traceback
-
-_workspace = "/workspace"
-_entry_path = ENTRY_PATH
-_user_code = USER_CODE
-_debug_mode = bool(DEBUG_MODE)
-
-_stdout_buffer = io.StringIO()
-_stderr_buffer = io.StringIO()
-_old_stdout = sys.stdout
-_old_stderr = sys.stderr
-_old_input = builtins.input
-_exit_code = 0
-
-def _browser_input(prompt=""):
-    if prompt:
-        print(prompt, end="")
-    raise RuntimeError("input() is not supported in the browser runner yet.")
-
-try:
-    sys.stdout = _stdout_buffer
-    sys.stderr = _stderr_buffer
-    builtins.input = _browser_input
-    os.chdir(_workspace)
-
-    _entry_dir = os.path.dirname(_entry_path)
-    for _path in (_entry_dir, _workspace):
-        if _path and _path not in sys.path:
-            sys.path.insert(0, _path)
-
-    _globals = {
-        "__name__": "__main__",
-        "__file__": _entry_path,
-        "__builtins__": builtins,
-    }
-    _compiled = compile(_user_code, _entry_path, "exec")
-
-    if _debug_mode:
-        import trace
-        trace.Trace(trace=True, ignoredirs=[sys.prefix, sys.exec_prefix]).runctx(_compiled, _globals, _globals)
-    else:
-        exec(_compiled, _globals, _globals)
-except SystemExit as _error:
-    if _error.code is None:
-        _exit_code = 0
-    elif isinstance(_error.code, int):
-        _exit_code = _error.code
-    else:
-        print(_error.code, file=sys.stderr)
-        _exit_code = 1
-except Exception:
-    _exit_code = 1
-    traceback.print_exc()
-finally:
-    sys.stdout = _old_stdout
-    sys.stderr = _old_stderr
-    builtins.input = _old_input
-
-json.dumps({
-    "stdout": _stdout_buffer.getvalue(),
-    "stderr": _stderr_buffer.getvalue(),
-    "code": _exit_code,
-})
-`;
+const SAMPLE_TERMINAL = "> ready\n> open a .js file or folder, then run it here";
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 function basename(filePath) {
   return filePath.split(/[\\/]/).pop() || filePath;
@@ -97,19 +24,19 @@ function makeId(prefix) {
   return `${prefix}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
 }
 
-function isPythonFile(name) {
-  return name.toLowerCase().endsWith(".py");
+function isJavaScriptFile(name) {
+  return name.toLowerCase().endsWith(".js");
 }
 
-function safePythonPath(filePath) {
+function safeScriptPath(filePath) {
   const normalized = normalizeRelativePath(filePath);
 
-  if (!isPythonFile(normalized)) {
-    throw new Error("Only .py scripts can be run.");
+  if (!isJavaScriptFile(normalized)) {
+    throw new Error("Only .js scripts can be run.");
   }
 
   if (normalized.split("/").some((part) => !part || part === "." || part === "..")) {
-    throw new Error("Invalid Python file path.");
+    throw new Error("Invalid JavaScript file path.");
   }
 
   return normalized;
@@ -140,6 +67,24 @@ function groupDocs(docs) {
   return groups;
 }
 
+function formatConsoleValue(value) {
+  if (typeof value === "string") return value;
+  if (value instanceof Error) return value.stack || value.message;
+  if (value === undefined) return "undefined";
+  if (typeof value === "function") return value.toString();
+
+  try {
+    const json = JSON.stringify(value, null, 2);
+    return json === undefined ? String(value) : json;
+  } catch {
+    return String(value);
+  }
+}
+
+function formatConsoleLine(values) {
+  return values.map(formatConsoleValue).join(" ");
+}
+
 async function requestJson(url, options) {
   const response = await fetch(url, {
     headers: { "content-type": "application/json" },
@@ -154,113 +99,65 @@ async function requestJson(url, options) {
   return body;
 }
 
-function loadScript(src) {
-  return new Promise((resolve, reject) => {
-    const existing = document.querySelector(`script[src="${src}"]`);
-
-    if (existing) {
-      existing.addEventListener("load", resolve, { once: true });
-      existing.addEventListener("error", reject, { once: true });
-      return;
-    }
-
-    const script = document.createElement("script");
-    script.src = src;
-    script.async = true;
-    script.onload = resolve;
-    script.onerror = () => reject(new Error("Could not load the browser Python runtime."));
-    document.head.append(script);
-  });
-}
-
-async function getPyodide() {
-  if (!pyodidePromise) {
-    pyodidePromise = (async () => {
-      if (!window.loadPyodide) {
-        await loadScript(PYODIDE_SCRIPT_URL);
-      }
-
-      if (!window.loadPyodide) {
-        throw new Error("The browser Python runtime did not start.");
-      }
-
-      return window.loadPyodide({ indexURL: PYODIDE_INDEX_URL });
-    })();
-  }
-
-  return pyodidePromise;
-}
-
-function resetBrowserWorkspace(pyodide) {
-  const { FS } = pyodide;
-
-  function removeTree(targetPath) {
-    if (!FS.analyzePath(targetPath).exists) return;
-
-    for (const name of FS.readdir(targetPath)) {
-      if (name === "." || name === "..") continue;
-
-      const childPath = `${targetPath}/${name}`;
-      const stat = FS.stat(childPath);
-
-      if (FS.isDir(stat.mode)) {
-        removeTree(childPath);
-      } else {
-        FS.unlink(childPath);
-      }
-    }
-
-    if (targetPath !== "/workspace") {
-      FS.rmdir(targetPath);
-    }
-  }
-
-  if (FS.analyzePath("/workspace").exists) {
-    removeTree("/workspace");
-  } else {
-    FS.mkdir("/workspace");
-  }
-}
-
-function writeBrowserProject(pyodide, files) {
-  resetBrowserWorkspace(pyodide);
-
-  for (const file of files) {
-    const relativePath = safePythonPath(file.path);
-    const targetPath = `/workspace/${relativePath}`;
-    const directory = targetPath.slice(0, targetPath.lastIndexOf("/"));
-
-    if (directory && directory !== "/workspace") {
-      pyodide.FS.mkdirTree(directory);
-    }
-
-    pyodide.FS.writeFile(targetPath, file.content || "", { encoding: "utf8" });
-  }
-}
-
-async function runPythonInBrowser({ entryPath, files, debug }) {
-  const pyodide = await getPyodide();
-  const safeEntryPath = safePythonPath(entryPath);
-  const entryFile = files.find((file) => safePythonPath(file.path) === safeEntryPath);
+async function runJavaScriptInBrowser({ entryPath, files, debug }) {
+  const safeEntryPath = safeScriptPath(entryPath);
+  const entryFile = files.find((file) => safeScriptPath(file.path) === safeEntryPath);
 
   if (!entryFile) {
-    throw new Error("The active Python file was not found in the browser workspace.");
+    throw new Error("The active JavaScript file was not found in the browser workspace.");
   }
 
-  writeBrowserProject(pyodide, files);
-  pyodide.globals.set("ENTRY_PATH", `/workspace/${safeEntryPath}`);
-  pyodide.globals.set("USER_CODE", entryFile.content || "");
-  pyodide.globals.set("DEBUG_MODE", Boolean(debug));
+  const stdout = [];
+  const stderr = [];
+  const filesObject = Object.fromEntries(
+    files.map((file) => [safeScriptPath(file.path), String(file.content || "")])
+  );
 
-  const result = await pyodide.runPythonAsync(PYTHON_RUNNER);
-  return JSON.parse(result);
+  const browserConsole = {
+    log: (...values) => stdout.push(formatConsoleLine(values)),
+    info: (...values) => stdout.push(formatConsoleLine(values)),
+    debug: (...values) => stdout.push(formatConsoleLine(values)),
+    table: (value) => stdout.push(formatConsoleValue(value)),
+    warn: (...values) => stderr.push(formatConsoleLine(values)),
+    error: (...values) => stderr.push(formatConsoleLine(values)),
+    clear: () => {
+      stdout.length = 0;
+      stderr.length = 0;
+    }
+  };
+
+  const source = [
+    debug ? "debugger;" : "",
+    String(entryFile.content || ""),
+    `\n//# sourceURL=${safeEntryPath}`
+  ].join("\n");
+
+  let exitCode = 0;
+
+  try {
+    const runner = new AsyncFunction("console", "files", "entryPath", source);
+    const result = await runner(browserConsole, filesObject, safeEntryPath);
+
+    if (result !== undefined) {
+      stdout.push(formatConsoleValue(result));
+    }
+  } catch (error) {
+    exitCode = 1;
+    stderr.push(error?.stack || error?.message || String(error));
+  }
+
+  return {
+    code: exitCode,
+    stdout: stdout.length ? `${stdout.join("\n")}\n` : "",
+    stderr: stderr.length ? `${stderr.join("\n")}\n` : ""
+  };
 }
 
 async function readFileHandle(handle) {
   const file = await handle.getFile();
 
-  if (!isPythonFile(file.name)) {
-    throw new Error("Only .py files can be opened.");
+  if (!isJavaScriptFile(file.name)) {
+    throw new Error("Only .js files can be opened.");
   }
 
   return {
@@ -269,15 +166,15 @@ async function readFileHandle(handle) {
   };
 }
 
-async function collectPythonFilesFromDirectory(directoryHandle, prefix = "") {
+async function collectJavaScriptFilesFromDirectory(directoryHandle, prefix = "") {
   const docs = [];
 
   for await (const [name, handle] of directoryHandle.entries()) {
     const relative = normalizeRelativePath(`${prefix}${name}`);
 
     if (handle.kind === "directory") {
-      docs.push(...(await collectPythonFilesFromDirectory(handle, `${relative}/`)));
-    } else if (handle.kind === "file" && isPythonFile(name)) {
+      docs.push(...(await collectJavaScriptFilesFromDirectory(handle, `${relative}/`)));
+    } else if (handle.kind === "file" && isJavaScriptFile(name)) {
       const file = await handle.getFile();
       docs.push({
         handle,
@@ -333,7 +230,7 @@ function App() {
   const [docs, setDocs] = useState([]);
   const [activeId, setActiveId] = useState(null);
   const [terminal, setTerminal] = useState(SAMPLE_TERMINAL);
-  const [projectName, setProjectName] = useState("Ali's Python Project");
+  const [projectName, setProjectName] = useState("Ali's JavaScript Project");
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
   const [isBusy, setIsBusy] = useState(false);
   const fileInputRef = useRef(null);
@@ -344,6 +241,7 @@ function App() {
   const activeDoc = docs.find((doc) => doc.id === activeId) || docs[0] || null;
   const groups = useMemo(() => groupDocs(docs), [docs]);
   const lines = activeDoc?.content.split("\n").length || 1;
+
   useEffect(() => {
     loadWorkspace();
   }, []);
@@ -378,7 +276,7 @@ function App() {
 
       setDocs(workspaceDocs);
       setActiveId(workspaceDocs[0]?.id || null);
-      setTerminal("> workspace loaded\n> Python files only");
+      setTerminal("> workspace loaded\n> JavaScript files only");
     } catch (error) {
       setTerminal(error.message);
     }
@@ -406,7 +304,7 @@ function App() {
       if (window.showOpenFilePicker) {
         const [handle] = await window.showOpenFilePicker({
           multiple: false,
-          types: [{ description: "Python scripts", accept: PYTHON_ACCEPT }]
+          types: [{ description: "JavaScript files", accept: JAVASCRIPT_ACCEPT }]
         });
         const file = await readFileHandle(handle);
         const rootId = makeId("file");
@@ -439,10 +337,10 @@ function App() {
     try {
       if (window.showDirectoryPicker) {
         const directoryHandle = await window.showDirectoryPicker();
-        const folderFiles = await collectPythonFilesFromDirectory(directoryHandle);
+        const folderFiles = await collectJavaScriptFilesFromDirectory(directoryHandle);
 
         if (!folderFiles.length) {
-          setTerminal(`> ${directoryHandle.name} has no .py files`);
+          setTerminal(`> ${directoryHandle.name} has no .js files`);
           return;
         }
 
@@ -461,7 +359,7 @@ function App() {
             writable: true
           }))
         );
-        setTerminal(`> opened folder ${directoryHandle.name}\n> ${folderFiles.length} Python file(s) found`);
+        setTerminal(`> opened folder ${directoryHandle.name}\n> ${folderFiles.length} JavaScript file(s) found`);
         return;
       }
 
@@ -476,8 +374,8 @@ function App() {
     event.target.value = "";
     if (!file) return;
 
-    if (!isPythonFile(file.name)) {
-      setTerminal("Only .py files can be opened.");
+    if (!isJavaScriptFile(file.name)) {
+      setTerminal("Only .js files can be opened.");
       return;
     }
 
@@ -499,11 +397,11 @@ function App() {
   }
 
   async function handleFallbackFolder(event) {
-    const files = Array.from(event.target.files || []).filter((file) => isPythonFile(file.name));
+    const files = Array.from(event.target.files || []).filter((file) => isJavaScriptFile(file.name));
     event.target.value = "";
 
     if (!files.length) {
-      setTerminal("No .py files were found in that folder.");
+      setTerminal("No .js files were found in that folder.");
       return;
     }
 
@@ -582,23 +480,23 @@ function App() {
 
   async function runActiveDoc(debug = false) {
     if (!activeDoc || isBusy) return;
-    if (!isPythonFile(activeDoc.relativePath)) {
-      setTerminal("Only .py scripts can be run.");
+    if (!isJavaScriptFile(activeDoc.relativePath)) {
+      setTerminal("Only .js scripts can be run.");
       return;
     }
 
     setIsBusy(true);
-    setTerminal(`> ${debug ? "debug" : "run"} ${activeDoc.relativePath}\n> starting browser Python...\n`);
+    setTerminal(`> ${debug ? "debug" : "run"} ${activeDoc.relativePath}\n> starting browser JavaScript...\n`);
 
     try {
       const projectFiles = docs
-        .filter((doc) => doc.rootId === activeDoc.rootId && isPythonFile(doc.relativePath))
+        .filter((doc) => doc.rootId === activeDoc.rootId && isJavaScriptFile(doc.relativePath))
         .map((doc) => ({
           path: doc.relativePath,
           content: doc.id === activeDoc.id ? activeDoc.content : doc.content
         }));
 
-      const result = await runPythonInBrowser({
+      const result = await runJavaScriptInBrowser({
         entryPath: activeDoc.relativePath,
         files: projectFiles,
         debug
@@ -613,7 +511,6 @@ function App() {
         .join("\n");
 
       setTerminal((current) => `${current}${output || "\n> no output"}`);
-
     } catch (error) {
       setTerminal((current) => `${current}\n${error.message}`);
     } finally {
@@ -688,7 +585,7 @@ function App() {
         <div className="pane-title explorer-title">
           <span>Explorer</span>
           <div className="pane-actions">
-            <button className="icon-button" type="button" title="Open Python file" onClick={openFile}>
+            <button className="icon-button" type="button" title="Open JavaScript file" onClick={openFile}>
               <Icon name="file" />
             </button>
             <button className="icon-button" type="button" title="Open folder" onClick={openFolder}>
@@ -697,7 +594,7 @@ function App() {
           </div>
         </div>
 
-        <div className="file-list" role="listbox" aria-label="Python files">
+        <div className="file-list" role="listbox" aria-label="JavaScript files">
           {groups.map((group) => (
             <section className="file-group" key={group.id}>
               <div className="group-name">{group.name}</div>
@@ -711,7 +608,7 @@ function App() {
                   onClick={() => setActiveId(doc.id)}
                   title={doc.relativePath}
                 >
-                  <span className="file-icon">PY</span>
+                  <span className="file-icon">JS</span>
                   <span className="file-name">{doc.relativePath}</span>
                   {doc.dirty && <span className="dirty-dot" aria-label="Pending changes" />}
                 </button>
@@ -724,7 +621,7 @@ function App() {
           ref={fileInputRef}
           className="hidden-picker"
           type="file"
-          accept=".py,text/x-python,text/plain"
+          accept=".js,text/javascript,application/javascript,text/plain"
           onChange={handleFallbackFile}
         />
         <input
@@ -748,7 +645,7 @@ function App() {
         <button
           className="tool-button run"
           type="button"
-          title="Run current Python script"
+          title="Run current JavaScript file"
           disabled={isBusy}
           onClick={() => runActiveDoc(false)}
         >
@@ -758,7 +655,7 @@ function App() {
         <button
           className="tool-button debug"
           type="button"
-          title="Debug current Python script"
+          title="Debug current JavaScript file"
           disabled={isBusy}
           onClick={() => runActiveDoc(true)}
         >
@@ -767,9 +664,9 @@ function App() {
         </button>
       </header>
 
-      <section className="editor-pane" aria-label="Python editor">
+      <section className="editor-pane" aria-label="JavaScript editor">
         <div className="tab-strip">
-          <div className="active-tab">{activeDoc ? activeDoc.relativePath : "No Python file"}</div>
+          <div className="active-tab">{activeDoc ? activeDoc.relativePath : "No JavaScript file"}</div>
           <div className="tab-spacer" aria-hidden="true" />
         </div>
         <div className="code-shell">
@@ -781,7 +678,7 @@ function App() {
             className="code-editor"
             value={activeDoc?.content || ""}
             spellCheck="false"
-            aria-label="Python code"
+            aria-label="JavaScript code"
             onChange={(event) => updateActiveContent(event.target.value)}
             onClick={updateCursor}
             onKeyUp={updateCursor}
@@ -800,7 +697,7 @@ function App() {
 
       <footer className="statusbar">
         <span>{activeDoc?.relativePath || "No file"}</span>
-        <span>Python runs in browser</span>
+        <span>JavaScript runs in browser</span>
         <span>
           Ln {cursor.line}, Col {cursor.column}
         </span>
