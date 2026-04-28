@@ -9,7 +9,33 @@ const JAVASCRIPT_ACCEPT = {
 };
 
 const SAMPLE_TERMINAL = "> ready\n> open a .js file or folder, then run it here";
+const STORAGE_KEY = "alis-code-editor.docs";
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+const SAMPLE_DOC = {
+  id: "browser:main.js",
+  origin: "browser",
+  rootId: "browser",
+  rootName: "Browser Project",
+  name: "main.js",
+  relativePath: "main.js",
+  content: [
+    "const projectName = \"Ali's Code Editor\";",
+    "",
+    "function greet(name) {",
+    "  return `Hello, ${name}!`;",
+    "}",
+    "",
+    "console.log(projectName);",
+    "console.log(greet(\"JavaScript\"));",
+    "",
+    "for (let number = 1; number <= 3; number += 1) {",
+    "  console.log(`Line ${number} is running`);",
+    "}",
+    ""
+  ].join("\n"),
+  dirty: false,
+  writable: false
+};
 
 function basename(filePath) {
   return filePath.split(/[\\/]/).pop() || filePath;
@@ -85,20 +111,6 @@ function formatConsoleLine(values) {
   return values.map(formatConsoleValue).join(" ");
 }
 
-async function requestJson(url, options) {
-  const response = await fetch(url, {
-    headers: { "content-type": "application/json" },
-    ...options
-  });
-  const body = await response.json();
-
-  if (!response.ok) {
-    throw new Error(body.error || "Request failed.");
-  }
-
-  return body;
-}
-
 async function runJavaScriptInBrowser({ entryPath, files, debug }) {
   const safeEntryPath = safeScriptPath(entryPath);
   const entryFile = files.find((file) => safeScriptPath(file.path) === safeEntryPath);
@@ -151,6 +163,54 @@ async function runJavaScriptInBrowser({ entryPath, files, debug }) {
     stdout: stdout.length ? `${stdout.join("\n")}\n` : "",
     stderr: stderr.length ? `${stderr.join("\n")}\n` : ""
   };
+}
+
+function loadBrowserDocs() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+    const docs = Array.isArray(stored)
+      ? stored
+          .filter((doc) => doc && isJavaScriptFile(String(doc.relativePath || "")))
+          .map((doc) => ({
+            ...doc,
+            id: String(doc.id || `browser:${doc.relativePath}`),
+            origin: "browser",
+            rootId: String(doc.rootId || "browser"),
+            rootName: String(doc.rootName || "Browser Project"),
+            name: String(doc.name || basename(doc.relativePath)),
+            relativePath: normalizeRelativePath(String(doc.relativePath)),
+            content: String(doc.content || ""),
+            dirty: false,
+            writable: false
+          }))
+      : [];
+
+    return docs.length ? docs : [{ ...SAMPLE_DOC }];
+  } catch {
+    return [{ ...SAMPLE_DOC }];
+  }
+}
+
+function storeBrowserDocs(docs) {
+  const browserDocs = docs.map(({ handle, ...doc }) => ({
+    ...doc,
+    dirty: false,
+    writable: false,
+    origin: "browser"
+  }));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(browserDocs));
+}
+
+function downloadJavaScriptFile(doc) {
+  const blob = new Blob([doc.content], { type: "text/javascript;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = basename(doc.relativePath);
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 async function readFileHandle(handle) {
@@ -243,7 +303,10 @@ function App() {
   const lines = activeDoc?.content.split("\n").length || 1;
 
   useEffect(() => {
-    loadWorkspace();
+    const browserDocs = loadBrowserDocs();
+    setDocs(browserDocs);
+    setActiveId(browserDocs[0]?.id || null);
+    setTerminal("> browser workspace loaded\n> JavaScript files only");
   }, []);
 
   useEffect(() => {
@@ -253,34 +316,6 @@ function App() {
   useEffect(() => {
     updateCursor();
   }, [activeDoc?.id]);
-
-  async function loadWorkspace() {
-    try {
-      const { files } = await requestJson("/api/workspace-files");
-      const workspaceDocs = await Promise.all(
-        files.map(async (filePath) => {
-          const body = await requestJson(`/api/workspace-file?path=${encodeURIComponent(filePath)}`);
-          return {
-            id: `workspace:${body.path}`,
-            origin: "workspace",
-            rootId: "workspace",
-            rootName: "Workspace",
-            name: basename(body.path),
-            relativePath: body.path,
-            content: body.content,
-            dirty: false,
-            writable: true
-          };
-        })
-      );
-
-      setDocs(workspaceDocs);
-      setActiveId(workspaceDocs[0]?.id || null);
-      setTerminal("> workspace loaded\n> JavaScript files only");
-    } catch (error) {
-      setTerminal(error.message);
-    }
-  }
 
   function replaceDoc(id, patch) {
     setDocs((current) =>
@@ -435,42 +470,34 @@ function App() {
     if (!activeDoc) return;
 
     try {
-      const documentsSave = await requestJson("/api/documents-file", {
-        method: "POST",
-        body: JSON.stringify({
-          path: activeDoc.relativePath,
-          content: activeDoc.content
-        })
-      });
-
-      let originalStatus = "> original file is browser read-only";
+      let status = "> saved in this browser";
 
       try {
-        if (activeDoc.origin === "workspace") {
-          await requestJson("/api/workspace-file", {
-            method: "POST",
-            body: JSON.stringify({
-              path: activeDoc.relativePath,
-              content: activeDoc.content
-            })
-          });
-          originalStatus = "> updated workspace file";
-        } else if (activeDoc.handle?.createWritable) {
+        if (activeDoc.handle?.createWritable) {
           const writable = await activeDoc.handle.createWritable();
           await writable.write(activeDoc.content);
           await writable.close();
-          originalStatus = "> updated original file";
+          status = "> updated original file";
         }
       } catch (error) {
-        originalStatus = `> original file update failed: ${error.message}`;
+        status = `> original file update failed: ${error.message}`;
       }
 
-      replaceDoc(activeDoc.id, { dirty: false });
+      const nextDocs = docs.map((doc) =>
+        doc.id === activeDoc.id ? { ...doc, content: activeDoc.content, dirty: false } : doc
+      );
+      setDocs(nextDocs);
+      storeBrowserDocs(nextDocs);
+
+      if (!activeDoc.handle?.createWritable) {
+        downloadJavaScriptFile(activeDoc);
+      }
+
       setTerminal(
         [
-          `> wrote ${activeDoc.relativePath}`,
-          originalStatus,
-          `> documents copy: ${documentsSave.absolutePath}`
+          `> saved ${activeDoc.relativePath}`,
+          status,
+          activeDoc.handle?.createWritable ? "> browser copy updated" : "> downloaded a copy"
         ].join("\n")
       );
     } catch (error) {
